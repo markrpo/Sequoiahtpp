@@ -59,7 +59,10 @@ void buffer_append(std::vector<uint8_t>* buf, const uint8_t* buff, ssize_t len) 
 }
 
 void buf_consume(std::vector<uint8_t>& buf, ssize_t len) {
+	printf("Buffer size: %i\n", (int)buf.size());
+	printf("Consuming %i bytes\n", (int)len);
 	buf.erase(buf.begin(), buf.begin() + len);
+	printf("New buffer size: %i\n", (int)buf.size());
 }
 
 bool parse_request (Conn* conn){
@@ -69,7 +72,10 @@ bool parse_request (Conn* conn){
 												// Could also use uint32_t len = *(uint32_t*)conn->read_buf.data(); (uint32_t size is 4 bytes)
 	if (conn->read_buf.size() < 4 + len) { return false; }	// If the buffer is smaller than 4 + len, we don't have a complete message
 	const uint8_t* data = conn->read_buf.data() + 4;		// data points to the start of the message (without the length)
-	printf("Received request: %.*s\n", (int)len, data);		// Print the message
+	printf("Received of length: %i\n", (int)len);		// Print the length of the message and print part of the message;
+	printf("Message: %.*s\n", (int)len < 10 ? (int)len : 10, (const char*)data);	// %.*s is a format specifier that takes two arguments, the first is the length of the string and the second is the string
+																					// if the length is less than 10, print the whole string, otherwise print the first 10 characters
+															
 	
 	// Logic goes here (when a message is received)
 	buffer_append(&conn->write_buf, (const uint8_t*)&len, 4); // Append the length of the message to the write buffer
@@ -79,32 +85,37 @@ bool parse_request (Conn* conn){
 	return true;
 }
 
+void handle_write(Conn* conn) {
+	printf("Writing %i bytes\n", (int)conn->write_buf.size());
+	assert(conn->write_buf.size() > 0);				// assert is used to check if a condition is true, if it is not, the program will terminate
+	ssize_t rv = write(conn->fd, conn->write_buf.data(), conn->write_buf.size());
+	if (rv < 0 && errno != EAGAIN) {				// EAGAIN means that the write would block, so we should try again later
+													// This is necessary because pipelined requests can cause the write buffer to fill up (and EAGAIN to be returned)
+		return;
+	}
+	if (rv < 0) { conn->want_close = true; return; }
+	printf("Wrote %i bytes\n", (int)rv);
+	buf_consume(conn->write_buf, rv);				// Remove the written data from the write buffer
+	if (conn->write_buf.size() == 0) {
+		conn->want_write = false;
+		conn->want_read = true;
+	}
+}
 
 void handle_read(Conn* conn) {
 	uint8_t buf[64 * 1024];
 	ssize_t rv = read(conn->fd, buf, sizeof(buf));
 	if (rv <= 0) {
 		conn->want_close = true;
+		return;
 	}
 	buffer_append(&conn->read_buf, buf, rv);		// we can also pass y reference to avoid copying the vector
 													// see buff_consume function (it uses reference)
-	parse_request(conn);							// See if we have a complete request, if so, parse it, process it and remove it from the buffer
+	while(parse_request(conn)){ }							// See if we have a complete request, if so, parse it, process it and remove it from the buffer
 	if (conn->write_buf.size() > 0) {
 		conn->want_read = false;
 		conn->want_write = true;
-	}
-}
-
-void handle_write(Conn* conn) {
-	ssize_t rv = write(conn->fd, conn->write_buf.data(), conn->write_buf.size());
-	if (rv < 0) {
-		conn->want_close = true;
-		return;
-	}
-	buf_consume(conn->write_buf, rv);				// Remove the written data from the write buffer
-	if (conn->write_buf.size() == 0) {
-		conn->want_write = false;
-		conn->want_read = true;
+		return handle_write(conn);
 	}
 }
 
@@ -174,7 +185,8 @@ int main () {
 			if (ready & POLLOUT) {
 				handle_write(conn);
 			}
-			if (ready & POLLERR) {
+			if (ready & POLLERR || conn->want_close ) {
+				printf("Closed on %i\n", conn->fd);
 				(void)close(conn->fd);
 				conns[conn->fd] = NULL;
 				delete conn;

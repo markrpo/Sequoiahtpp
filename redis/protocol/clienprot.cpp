@@ -10,7 +10,8 @@
 #include <cassert>
 
 #define msg printf
-const size_t k_max_msg = 4096;
+const size_t k_max_msg = 32 << 20;  // this is like doing 32 * 2^20 (32MB) since << is a bit shift operator that shifts the bits to the left example:
+									// 2 = 00000010 -> 2 << 1 = 00000100 = 4 (adds a 0 to the right)
 
 static void die(const char* msg) {
 	perror(msg);
