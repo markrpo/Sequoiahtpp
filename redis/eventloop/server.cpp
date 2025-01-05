@@ -26,21 +26,11 @@
 																					the kernel, so the readiness for a disk file is undefined. */
 #include "utils.hpp"
 
-enum {
-	STATE_READ,
-	STATE_WRITE,
-	STATE_CLOSE
-};
-
-enum {
-	RES_OK,
-	RES_ERR,
-	RES_NX 
-};
-
 struct Conn{
 		int fd = -1;
-		uint8_t state = STATE_READ;
+		bool want_read = false;													/* 	We use bool instead of int because we only need two states: true or false. */
+		bool want_write = false;
+		bool want_close = false;
 		std::vector<uint8_t> read_buf;											/* 	We use uint8_t instead of char because char is signed by default, 
 																					so it can be interpreted as a negative number, which is not what we want. */
 		std::vector<uint8_t> write_buf;
@@ -56,14 +46,16 @@ Conn* handle_accept(int fd) {
 
 	Conn* conn = new Conn();
 	conn->fd = client_fd;
-	conn->state = STATE_READ;
+	conn->want_read = true;
 	return conn;
 }
 
 void buffer_append(std::vector<uint8_t>* buf, const uint8_t* buff, ssize_t len) {
 	buf->insert(buf->end(), buff, buff + len); 		// The insert method inserts elements into the vector at the specified position
-													// in this case, we insert the elements at the end of buf
-													// and the data do copy is going to be the data from buff to buff + len (memory range)
+													// buf->end() returns an iterator to the end of the vector
+													// buff + len is a pointer to the end of the buffer
+	
+
 }
 
 void buf_consume(std::vector<uint8_t>& buf, ssize_t len) {
@@ -73,43 +65,6 @@ void buf_consume(std::vector<uint8_t>& buf, ssize_t len) {
 	printf("New buffer size: %i\n", (int)buf.size());
 }
 
-int32_t do_request(const uint8_t* data, Conn* conn, uint32_t len, uint32_t* rescode, uint32_t* wlen) {
-	// Logic goes here (when a message is received)
-	*rescode = RES_OK;
-	*wlen = len;
-	printf("Copied %i bytes\n", (int)len);
-	buffer_append(&conn->write_buf, (const uint8_t*)&len, 4); // Append the data to the res buffer
-	buffer_append(&conn->write_buf, data, len); // Copy the data from data to res (length of len)
-	return 0;
-}
-
-//int32_t do_request(const uint8_t* data, uint8_t* res, uint32_t len, uint32_t* rescode, uint32_t* wlen) {
-	// Logic goes here (when a message is received)
-//	*rescode = RES_OK;
-//	*wlen = len;
-//	memcpy(res, data, len);
-//	return 0;
-//} 
-
-bool handle_write(Conn* conn) {
-	printf("Writing %i bytes\n", (int)conn->write_buf.size());
-	assert(conn->write_buf.size() > 0);				// assert is used to check if a condition is true, if it is not, the program will terminate
-	ssize_t rv = write(conn->fd, conn->write_buf.data(), conn->write_buf.size());
-	if (rv < 0 && errno != EAGAIN) {				// EAGAIN means that the write would block, so we should try again later
-													// This is necessary because pipelined requests can cause the write buffer to fill up (and EAGAIN to be returned)
-		return false;
-	}
-	if (rv < 0) { conn->state = STATE_CLOSE ; return false; }
-	printf("Wrote %i bytes\n", (int)rv);
-	buf_consume(conn->write_buf, rv);				// Remove the written data from the write buffer
-	if (conn->write_buf.size() == 0) {
-		conn->state = STATE_READ;
-		printf("Switching to read\n");
-		return false;
-	}
-	return true;
-}
-
 bool parse_request (Conn* conn){
 	if (conn->read_buf.size() < 4) { return false; }
 	uint32_t len = 0; 
@@ -117,49 +72,51 @@ bool parse_request (Conn* conn){
 												// Could also use uint32_t len = *(uint32_t*)conn->read_buf.data(); (uint32_t size is 4 bytes)
 	if (conn->read_buf.size() < 4 + len) { return false; }	// If the buffer is smaller than 4 + len, we don't have a complete message
 	const uint8_t* data = conn->read_buf.data() + 4;		// data points to the start of the message (without the length)
-
 	printf("Received of length: %i\n", (int)len);		// Print the length of the message and print part of the message;
 	printf("Message: %.*s\n", (int)len < 10 ? (int)len : 10, (const char*)data);	// %.*s is a format specifier that takes two arguments, the first is the length of the string and the second is the string
 																					// if the length is less than 10, print the whole string, otherwise print the first 10 characters
-	
-	uint32_t rescode = 0;
-	uint32_t wlen = 0;
-	int32_t err = do_request(data, conn, len, &rescode, &wlen);	// Call the do_request function
-	//int32_t err = do_request(data, conn->write_buf.data() + (4+4), len, &rescode, &wlen);	
-	if (err) { conn->state = STATE_CLOSE; return false; }
-
-	wlen += 4;
-
-														
+															
 	
 	// Logic goes here (when a message is received)
-	// buffer append recieves the buffer, starting address of the data and the length of the data we want to append
-	//buffer_append(&conn->write_buf, (const uint8_t*)&wlen, 4); // Append the length of the message to the write buffer
-	//buffer_append(&conn->write_buf, (const uint8_t*)&rescode, 4); // Append the result code to the write buffer
+	buffer_append(&conn->write_buf, (const uint8_t*)&len, 4); // Append the length of the message to the write buffer
+	buffer_append(&conn->write_buf, data, len);				// Append the message to the write buffer (echo)
 
-	// Remove the message from the read buffer 
-	// buf_consume recieves the buffer and the length of the data we want to remove
-	buf_consume(conn->read_buf, 4 + len);					
-	conn->state = STATE_WRITE;								
-	while (handle_write(conn) == true) { 
-	}							// Write until we send all the data (or we get EAGAIN (kernel buffer full))
-	return true;						// Return true if we send all the data
+	buf_consume(conn->read_buf, 4 + len);					// Remove the message from the read buffer
+	return true;
 }
 
-bool handle_read(Conn* conn) {
+void handle_write(Conn* conn) {
+	printf("Writing %i bytes\n", (int)conn->write_buf.size());
+	assert(conn->write_buf.size() > 0);				// assert is used to check if a condition is true, if it is not, the program will terminate
+	ssize_t rv = write(conn->fd, conn->write_buf.data(), conn->write_buf.size());
+	if (rv < 0 && errno != EAGAIN) {				// EAGAIN means that the write would block, so we should try again later
+													// This is necessary because pipelined requests can cause the write buffer to fill up (and EAGAIN to be returned)
+		return;
+	}
+	if (rv < 0) { conn->want_close = true; return; }
+	printf("Wrote %i bytes\n", (int)rv);
+	buf_consume(conn->write_buf, rv);				// Remove the written data from the write buffer
+	if (conn->write_buf.size() == 0) {
+		conn->want_write = false;
+		conn->want_read = true;
+	}
+}
+
+void handle_read(Conn* conn) {
 	uint8_t buf[64 * 1024];
 	ssize_t rv = read(conn->fd, buf, sizeof(buf));
 	if (rv <= 0) {
-		conn->state = STATE_CLOSE;
-		return false;
+		conn->want_close = true;
+		return;
 	}
 	buffer_append(&conn->read_buf, buf, rv);		// we can also pass y reference to avoid copying the vector
 													// see buff_consume function (it uses reference)
 	while(parse_request(conn)){ }							// See if we have a complete request, if so, parse it, process it and remove it from the buffer
 	if (conn->write_buf.size() > 0) {
-		conn->state = STATE_WRITE;	
+		conn->want_read = false;
+		conn->want_write = true;
+		return handle_write(conn);
 	}
-	return true;
 }
 
 int main () {
@@ -195,8 +152,8 @@ int main () {
 		for ( Conn* conn : conns ) {
 			if (!conn) { continue; }
 			struct pollfd pfd = {conn->fd, POLLERR, 0};
-			if (conn->state == STATE_READ) { pfd.events |= POLLIN; }		// because conn is a pointer to a sctruct (Conn*) we use -> instead of . to access its members
-			if (conn->state == STATE_WRITE) { pfd.events |= POLLOUT; }
+			if (conn->want_read) { pfd.events |= POLLIN; }		// because conn is a pointer to a sctruct (Conn*) we use -> instead of . to access its members
+			if (conn->want_write) { pfd.events |= POLLOUT; }
 			poll_args.push_back(pfd);
 		}
 		/* 	.data() returns a pointer to the pollfd array (poll_args) is the same as &poll_args[0], nfds_t type is a typedef for unsigned 
@@ -226,16 +183,17 @@ int main () {
 				handle_read(conn);								// handle_read will read data from the connection and store it in the read buffer
 			}
 			if (ready & POLLOUT) {
-				printf("Ready to write on %i\n", conn->fd);
 				handle_write(conn);
 			}
-			if (ready & POLLERR || conn->state == STATE_CLOSE) { 
+			if (ready & POLLERR || conn->want_close ) {
 				printf("Closed on %i\n", conn->fd);
 				(void)close(conn->fd);
 				conns[conn->fd] = NULL;
 				delete conn;
 			}
 		}
+
+
 	}
 }
 
