@@ -63,7 +63,8 @@ static int32_t send_req(int fd, const uint8_t *text, size_t len) {
     }
 
     std::vector<uint8_t> wbuf;
-	std::cout << "Writting text: " << text << " len: " << len << std::endl;
+	// print only the first 100 characters
+	printf("Writting text: %.*s len: %zu\n", len < 100 ? len : 100, text, len); 
     buf_append(wbuf, (const uint8_t *)&len, 4);
     buf_append(wbuf, text, len);
     return write_all(fd, wbuf.data(), wbuf.size());
@@ -127,7 +128,8 @@ int main() {
         "hello5",
     };
     for (const std::string &s : query_list) {
-		std::cout << "Send: " << s << std::endl;
+		// print only the first 100 characters
+		printf("Sending text: %.*s\n", s.size() < 100 ? s.size() : 100, s.data());
         int32_t err = send_req(fd, (uint8_t *)s.data(), s.size());
         if (err) {
             goto L_DONE;
