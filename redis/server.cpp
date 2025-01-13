@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cassert>
 #include <vector>
+#include <map>
 #include <poll.h>																/*	Poll is used to wait for some event on a file descriptor structure:
 				 															 		int poll(struct pollfd fds[], nfds_t nfds, int timeout)
 				 															 		fds[] - array of pollfd structures, nfds - number of structures in the array, timeout - time to wait in milliseconds
@@ -81,6 +82,49 @@ Conn* handle_accept(int fd) {
 	conn->fd = client_fd;
 	conn->state = STATE_READ;
 	return conn;
+}
+
+static std::map<std::string, std::string> g_map;
+
+int32_t real_request(const uint8_t* data, Conn* conn, uint32_t len, uint32_t* rescode, uint32_t* wlen) {
+	// first 4 bytes are the number of strings in the request, each string is prefixed with a 4 byte length
+	uint32_t n = 0;
+	memcpy(&n, data, 4);
+	std::vector<std::string> reqs;
+	uint32_t offset = 4;
+	while (n--) { 																								// 	Iterate over the strings in the request
+		uint32_t slen = 0;
+		memcpy(&slen, data + offset, 4);																		// 	Copy 4 bytes from the data buffer to slen (length of the string)
+		offset += 4;
+		std::string s((const char*)data + offset, slen);
+		offset += slen;
+		reqs.push_back(s);
+	}
+	// process the request
+	if (reqs.size() == 2 && reqs[0] == "get") {
+		*rescode = RES_OK;
+		const char *msg = "Hello, World!";
+		*wlen = strlen(msg);
+		return 0;
+	} else if (reqs.size() == 3 && reqs[0] == "set") {
+		//(void)res;
+		(void)wlen;																								// (void) is used to cast a variable to void, so the compiler doesn't complain about unused variables
+		g_map[reqs[1]] = reqs[2];
+		*rescode = RES_OK;
+		return 0;
+	} else if (reqs.size() == 2 && reqs[0] == "del") {
+		//(void)res;
+		(void)wlen;
+		g_map.erase(reqs[1]);
+		*rescode = RES_OK;
+		return 0;
+	} else {
+		*rescode = RES_ERR;
+		const char *msg = "Unknown cmd";
+		*wlen = strlen(msg);
+		return 0;
+	}
+	return 0;
 }
 
 int32_t do_request(const uint8_t* data, Conn* conn, uint32_t len, uint32_t* rescode, uint32_t* wlen) {
