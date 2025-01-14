@@ -84,9 +84,18 @@ Conn* handle_accept(int fd) {
 	return conn;
 }
 
-static std::map<std::string, std::string> g_map;
+static std::map<std::string, std::string> g_map; 																// 	Map is a key-value pair, in this case, the key and value are both strings
 
-int32_t real_request(const uint8_t* data, Conn* conn, uint32_t len, uint32_t* rescode, uint32_t* wlen) {
+// Request format:
+// +------+-----+------+-----+------+-----+-----+------+
+// | nstr | len | str1 | len | str2 | ... | len | strn |
+// +------+-----+------+-----+------+-----+-----+------+
+// Response format (data may be empty):
+// +--------+---------+
+// | status | data... |
+// +--------+---------+
+
+int32_t real_request(const uint8_t* data, uint32_t len, uint8_t* wdata, uint32_t* rescode, uint32_t* wlen) {
 	// first 4 bytes are the number of strings in the request, each string is prefixed with a 4 byte length
 	uint32_t n = 0;
 	memcpy(&n, data, 4);
@@ -100,45 +109,42 @@ int32_t real_request(const uint8_t* data, Conn* conn, uint32_t len, uint32_t* re
 		offset += slen;
 		reqs.push_back(s);
 	}
+	printf("Request: ");
+	for (const std::string& s : reqs) {
+		printf("%s ", s.c_str());
+	}
 	// process the request
 	if (reqs.size() == 2 && reqs[0] == "get") {
+		auto it = g_map.find(reqs[1]); 																			//	it is an iterator to the element in the map, it->first is the key, it->second is the value
+		if (it == g_map.end()) {
+			*rescode = RES_NX;
+			return 0;
+		}
+		// copy the value to the wdata buffer
+		std::string& val = it->second; 																			// 	Reference to the value in the map
+		*wlen = val.size();
+		memcpy(wdata, val.data(), val.size());
 		*rescode = RES_OK;
-		const char *msg = "Hello, World!";
-		*wlen = strlen(msg);
 		return 0;
 	} else if (reqs.size() == 3 && reqs[0] == "set") {
-		//(void)res;
 		(void)wlen;																								// (void) is used to cast a variable to void, so the compiler doesn't complain about unused variables
 		g_map[reqs[1]] = reqs[2];
 		*rescode = RES_OK;
 		return 0;
 	} else if (reqs.size() == 2 && reqs[0] == "del") {
-		//(void)res;
 		(void)wlen;
 		g_map.erase(reqs[1]);
 		*rescode = RES_OK;
 		return 0;
 	} else {
+		std::string msg = "cmd not found";
+		*wlen = msg.size();
+		memcpy(wdata, msg.data(), msg.size());
 		*rescode = RES_ERR;
-		const char *msg = "Unknown cmd";
-		*wlen = strlen(msg);
 		return 0;
 	}
 	return 0;
 }
-
-int32_t do_request(const uint8_t* data, Conn* conn, uint32_t len, uint32_t* rescode, uint32_t* wlen) {
-	// This do request only echoes the message back to the client
-	*rescode = RES_OK;
-	*wlen = len;
-	printf("Copied %i bytes\n", (int)len);
-	memcpy(&conn->write_buf[conn->write_size], &len, 4);														//  Coppy to the end of the write buffer (that is the write_size variable) the length of the message (len, 4 bytes long)
-	conn->write_size += 4;
-	memcpy(&conn->write_buf[conn->write_size], data, len);
-	conn->write_size += len;
-	return 0;
-}
-
 
 bool handle_write(Conn* conn) {
 	assert(conn->write_size > 0);																				// 	Assert is used to check if a condition is true, if it is not, the program will terminate
@@ -153,7 +159,7 @@ bool handle_write(Conn* conn) {
 		return false;
 	}
 	if (rv < 0) { conn->state = STATE_CLOSE; printf("rv < 0 Closing"); return false; }
-	printf("Wrote %i bytes\n", (int)rv);
+	printf("Wrote %i bytes, remaining (write buff): %i\n", (int)rv, (int)(conn->write_size - rv));
 	size_t remain = conn->write_size - rv;
 	if (remain > 0)	{
 	memmove(&conn->write_buf[0], &conn->write_buf[rv], remain);													// 	Move remaining data from write buffer [rv] position to the start of the buffer [0]
@@ -164,7 +170,6 @@ bool handle_write(Conn* conn) {
 		printf("Switching to read ALL in writte buffer writted\n");
 		return false;
 	}
-	printf ("Still data to write\n");
 	return true;
 }
 
@@ -184,20 +189,23 @@ bool parse_request (Conn* conn){
 	
 	uint32_t rescode = 0;
 	uint32_t wlen = 0;
-	int32_t err = do_request(data, conn, len, &rescode, &wlen);
-	//int32_t err = do_request(data, conn->write_buf.data() + (4+4), len, &rescode, &wlen);	
+	uint8_t *wdata = conn->write_buf + 4 + 4;																	// 	Pointer to the start of the write buffer (without the length and the result code)
+	int32_t err = real_request(data, len, wdata, &rescode, &wlen);
 	if (err) { conn->state = STATE_CLOSE; return false; }
 
-	wlen += 4;
-	
+	wlen += 4;																									// 	Increase the length of the message by 4 bytes (rescode)
+	memcpy(&conn->write_buf[conn->write_size], &wlen, 4);														// 	Copy the length of the message to the start of the write buffer
+	memcpy(&conn->write_buf[conn->write_size + 4], &rescode, 4);												// 	Copy the result code to the write buffer
+	conn->write_size = wlen + 8;																				// 	Set the write size to the length of the message + 8 bytes (4 bytes for the length and 4 bytes for the result code)
+
+	printf("Message parsed, read size changed from %i to %i\n", (int)conn->read_size, (int)(conn->read_size - (4 + len)));
 	// Remove the message from the read buffer 
 	size_t remain = conn->read_size - (4 + len);
 	if (remain > 0)	{
 		memmove(&conn->read_buf[0], &conn->read_buf[4 + len], remain);
 	}
 	conn->read_size = remain;
-
-	conn->state = STATE_WRITE;								
+	conn->state = STATE_WRITE;			
 	while (handle_write(conn)) { 
 	}																											// 	Write until we send all the data (or we get EAGAIN (kernel buffer full))
 	printf ("handle_write returned false\n");
@@ -227,12 +235,9 @@ bool handle_read(Conn* conn) {
 	mempcpy(&conn->read_buf[conn->read_size], buf, rv);															// 	Append the data to the read buffer
 	conn->read_size += rv;																						// 	Increase the size of the read buffer
 	printf("Read size: %i\n", (int)conn->read_size);
-	printf("Size of read_buf: %i\n", (int)sizeof(conn->read_buf));
 	assert(conn->read_size <= sizeof(conn->read_buf));
 	while(parse_request(conn)){ }																				// 	See if we have a complete request (will stay in the loop until we don't have a complete request)
-	//if (conn->write_buf.size() > 0) {
-	//	conn->state = STATE_WRITE;	
-	//}
+	
 	delete[] buf;
 	return true;
 }
