@@ -70,7 +70,9 @@ static int32_t send_req(int fd, const std::vector<std::string> &cmd) {
         memcpy(&wbuf[cur + 4], s.data(), s.size());
         cur += 4 + s.size();
     }
-    return write_all(fd, wbuf, 4 + len);
+	// duplicate wbuf
+	memcpy(&wbuf[cur], &wbuf[0], len + 4);
+    return write_all(fd, wbuf, 2*(4 + len));
 }
 
 static int32_t read_res(int fd) {
@@ -131,6 +133,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) {
         cmd.push_back(argv[i]);
     }
+
     int32_t err = send_req(fd, cmd);
     if (err) {
         goto L_DONE;

@@ -40,6 +40,7 @@ enum {
 };
 
 const size_t MAX_BUF_SIZE = 32 << 20; 												// 32 MB
+const size_t K_MAX_STRINGS = 1024;
 
 struct Conn{
 		int fd = -1;
@@ -99,15 +100,17 @@ int32_t real_request(const uint8_t* data, uint32_t len, uint8_t* wdata, uint32_t
 	// first 4 bytes are the number of strings in the request, each string is prefixed with a 4 byte length
 	uint32_t n = 0;
 	memcpy(&n, data, 4);
+	if (n > K_MAX_STRINGS) { printf("too many strings\n"); return -1; } 
 	std::vector<std::string> reqs;
 	uint32_t offset = 4;
 	while (n--) { 																								// 	Iterate over the strings in the request
 		uint32_t slen = 0;
 		memcpy(&slen, data + offset, 4);																		// 	Copy 4 bytes from the data buffer to slen (length of the string)
+		if (offset + 4 + slen > len) { printf("bad request\n"); return -1; } 									// 	Check if the length of the string is valid
 		offset += 4;
-		std::string s((const char*)data + offset, slen);
+		reqs.emplace_back((const char*)data + offset, slen);													// 	What emplace_back does is to construct the object in place, 
+																												// 	so it doesn't have to be copied or moved, it is constructed in the vector
 		offset += slen;
-		reqs.push_back(s);
 	}
 	printf("Request: ");
 	for (const std::string& s : reqs) {
